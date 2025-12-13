@@ -39,12 +39,12 @@ Existing SQL benchmarks have critical limitations:
 │                                    │                                         │
 │                                    ▼                                         │
 │  ┌─────────────────────────────────────────────────────────────────────┐    │
-│  │                 ORM INFRASTRUCTURE LAYER (SQLAlchemy)                │    │
+│  │            POSTGRESQL DATA LAYER (psycopg3 — Zero ORM)               │    │
 │  │  ┌───────────────┐  ┌───────────────┐  ┌───────────────────────┐    │    │
-│  │  │ DatabaseMgr   │  │ SchemaInspect │  │ FixtureLoader         │    │    │
-│  │  │ • Engines     │  │ • Tables      │  │ • ORM bulk insert     │    │    │
-│  │  │ • Dialects    │  │ • Columns     │  │ • Raw bulk fallback   │    │    │
-│  │  │ • Pooling     │  │ • Nested types│  │ • FK integrity        │    │    │
+│  │  │ ConnectionPool│  │ SchemaInspect │  │ FixtureLoader         │    │    │
+│  │  │ • psycopg_pool│  │ • pg_catalog  │  │ • COPY protocol       │    │    │
+│  │  │ • Async ready │  │ • info_schema │  │ • Bulk streaming      │    │    │
+│  │  │ • Auto-retry  │  │ • FK/PK maps  │  │ • Transactional       │    │    │
 │  │  └───────────────┘  └───────────────┘  └───────────────────────┘    │    │
 │  └─────────────────────────────────────────────────────────────────────┘    │
 │                                    │                                         │
@@ -52,17 +52,17 @@ Existing SQL benchmarks have critical limitations:
 │          ▼                         ▼                         ▼              │
 │  ┌───────────────┐    ┌─────────────────────┐    ┌───────────────────┐      │
 │  │ AGENT SANDBOX │    │ HALLUCINATION       │    │ RESULT COMPARATOR │      │
-│  │ • Tool APIs   │    │ DETECTOR            │    │ • pd.read_sql()   │      │
-│  │ • GetSchema   │◄───│ • Column validator  │    │ • Multi-strategy  │      │
-│  │ • SampleRows  │    │ • Table validator   │    │   comparison      │      │
-│  │ • ValidateSQL │    │ • JOIN path verify  │    │                   │      │
+│  │ • Tool APIs   │    │ DETECTOR            │    │ • Row comparison  │      │
+│  │ • GetSchema   │◄───│ • sqlglot AST parse │    │ • Multi-strategy  │      │
+│  │ • SampleRows  │    │ • Schema validation │    │   (exact/set/     │      │
+│  │ • ValidateSQL │    │ • JOIN path verify  │    │    fuzzy/schema)  │      │
 │  └───────────────┘    └─────────────────────┘    └───────────────────┘      │
 │          │                         ▲                         ▲              │
 │          ▼                         │                         │              │
 │  ┌─────────────────────────────────────────────────────────────────────┐    │
-│  │                   RAW SQL EVALUATION LAYER                           │    │
-│  │  • connection.execute(text(agent_sql)) — NO ORM ABSTRACTION          │    │
-│  │  • Query plan capture • Execution timing • Error classification      │    │
+│  │                   RAW SQL EXECUTION LAYER                            │    │
+│  │  • cur.execute(agent_sql) — direct PostgreSQL execution              │    │
+│  │  • EXPLAIN ANALYZE capture • Timing • Error classification           │    │
 │  └─────────────────────────────────────────────────────────────────────┘    │
 │                                    │                                         │
 │                                    ▼                                         │
@@ -79,17 +79,20 @@ Existing SQL benchmarks have critical limitations:
 
 ## 🔑 Key Design Principles
 
-### 1. ORM for Infrastructure, Raw SQL for Evaluation
+### 1. Zero ORM — Direct PostgreSQL Access
 
 ```python
-# ✅ ORM handles infrastructure
-engine = create_engine("snowflake://user:pass@account/db")
-inspector = inspect(engine)
-columns = inspector.get_columns("orders")  # Schema introspection
+# ✅ Connection pooling with psycopg3
+from psycopg_pool import ConnectionPool
 
-# ✅ Raw SQL for agent evaluation (no abstraction interference)
-with engine.connect() as conn:
-    result = conn.execute(text(agent_generated_sql))  # Verbatim execution
+pool = ConnectionPool("postgresql://user:pass@localhost/db", min_size=2, max_size=10)
+
+with pool.connection() as conn:
+    # Schema introspection via catalog queries
+    tables = conn.execute("SELECT table_name FROM information_schema.tables WHERE table_schema = 'public'").fetchall()
+    
+    # Raw SQL execution for agent evaluation
+    result = conn.execute(agent_generated_sql)  # Direct, no abstraction
 ```
 
 ### 2. Structural Hallucination Prevention
@@ -130,15 +133,10 @@ agentx/
 │   │   │   ├── agent_interface.py  # Agent protocol/ABC
 │   │   │   └── config.py           # Framework configuration
 │   │   │
-│   │   ├── infrastructure/         # ORM Infrastructure Layer
-│   │   │   ├── database_manager.py # Multi-dialect engine management
-│   │   │   ├── schema_inspector.py # SQLAlchemy + INFORMATION_SCHEMA
-│   │   │   ├── fixture_loader.py   # Tiered bulk loading
-│   │   │   └── dialects/           # Dialect-specific extensions
-│   │   │       ├── bigquery.py
-│   │   │       ├── snowflake.py
-│   │   │       ├── postgres.py
-│   │   │       └── duckdb.py
+│   │   ├── infrastructure/         # PostgreSQL Data Layer (Zero ORM)
+│   │   │   ├── database_manager.py # psycopg3 connection pool
+│   │   │   ├── schema_inspector.py # pg_catalog introspection
+│   │   │   └── fixture_loader.py   # COPY-based bulk loading
 │   │   │
 │   │   ├── sandbox/                # Agent Interaction Layer
 │   │   │   ├── tool_registry.py    # Tool definitions
@@ -200,16 +198,17 @@ agentx/
 
 ---
 
-## 🗄️ Supported Databases
+## 🗄️ Database
 
-| Database   | SQLAlchemy Dialect    | Status     |
-| ---------- | --------------------- | ---------- |
-| PostgreSQL | `postgresql+psycopg2` | ✅ Core    |
-| SQLite     | `sqlite`              | ✅ Core    |
-| DuckDB     | `duckdb_engine`       | ✅ Core    |
-| BigQuery   | `bigquery`            | ✅ Cloud   |
-| Snowflake  | `snowflake`           | ✅ Cloud   |
-| ClickHouse | `clickhouse`          | 🔄 Planned |
+| Database   | Driver                | Features |
+| ---------- | --------------------- | -------- |
+| PostgreSQL | `psycopg3` + `psycopg_pool` | Connection pooling, COPY protocol, async support, EXPLAIN ANALYZE |
+
+> **Why PostgreSQL only?** AgentX is optimized for enterprise SQL evaluation. PostgreSQL provides the best combination of:
+> - Advanced query planning (`EXPLAIN ANALYZE`)
+> - High-performance bulk loading (`COPY`)
+> - Rich catalog introspection (`pg_catalog`, `information_schema`)
+> - JSONB support for nested types
 
 ---
 
@@ -271,12 +270,12 @@ agentx/
 
 | Dimension                   | Spider 2.0            | AgentX                                                                | Improvement             |
 | --------------------------- | --------------------- | --------------------------------------------------------------------- | ----------------------- |
-| **Hallucination Detection** | Post-execution only   | Pre-execution schema validation                                       | Structural prevention   |
+| **Hallucination Detection** | Post-execution only   | Pre-execution schema validation via `pg_catalog`                      | Structural prevention   |
 | **Scoring**                 | Binary pass/fail      | Multi-dimensional (correctness, hallucination, efficiency, grounding) | Root-cause visibility   |
-| **Dialect Management**      | Separate handling     | Unified SQLAlchemy abstraction                                        | Maintainability         |
-| **Fixture Reproducibility** | Not specified         | ORM models + transactional rollback                                   | Deterministic isolation |
+| **Database Layer**          | Mixed/unspecified     | Zero-ORM psycopg3 with connection pooling                             | Performance + simplicity|
+| **Fixture Loading**         | Varies                | PostgreSQL `COPY` protocol (fastest bulk load)                        | Deterministic + fast    |
 | **Error Analysis**          | Manual categorization | Automated taxonomy classification                                     | Scalable analysis       |
-| **Nested Types**            | Major failure mode    | Hybrid introspection (ORM + INFORMATION_SCHEMA)                       | Enterprise support      |
+| **Schema Introspection**    | Framework-dependent   | Direct `pg_catalog` queries (no ORM overhead)                         | Enterprise support      |
 
 ---
 
@@ -301,19 +300,18 @@ python scripts/run_evaluation.py --tasks tasks/tasks.yaml --agent your_agent
 
 ## 📅 Implementation Roadmap
 
-### Phase 1: Foundation & Database Infrastructure (Weeks 1-2)
+### Phase 1: PostgreSQL Data Layer (Weeks 1-2)
 
-- `DatabaseManager` with SQLAlchemy engine factory
-- PostgreSQL, SQLite, DuckDB support
-- Docker Compose for local databases
+- `DatabaseManager` with psycopg3 connection pool
+- `SchemaInspector` using `pg_catalog` queries
+- Docker Compose for local PostgreSQL
 - Configuration system
 
 ### Phase 2: Schema Introspection & Fixtures (Weeks 3-4)
 
-- `SchemaInspector` using `sqlalchemy.inspect()`
-- Hybrid introspection for nested types
-- `FixtureLoader` with tiered loading
-- Transactional setup/teardown
+- Complete schema introspection (tables, columns, FKs, PKs)
+- `FixtureLoader` with PostgreSQL `COPY` protocol
+- Transactional setup/teardown via savepoints
 
 ### Phase 3: Hallucination Detection (Weeks 5-6)
 
@@ -325,21 +323,21 @@ python scripts/run_evaluation.py --tasks tasks/tasks.yaml --agent your_agent
 
 - Tool protocol definition
 - GetSchema, SampleRows, ValidateSQL, ExecuteSQL tools
-- Session management
+- Session management with state tracking
 
 ### Phase 5: Evaluation Pipeline (Weeks 9-11)
 
-- Raw SQL executor
+- Raw SQL executor with `EXPLAIN ANALYZE` capture
 - Result comparators (exact, set, fuzzy, schema-only)
 - Multi-dimensional scorer
 - Structured logging and error taxonomy
 
-### Phase 6: Cloud & Advanced (Weeks 12-14)
+### Phase 6: Polish & Production (Weeks 12-14)
 
-- BigQuery and Snowflake dialects
-- Cost estimation scoring
-- dbt project introspection
+- CLI runner and reporter
 - Metrics dashboard
+- Documentation and testing
+- Performance optimization
 
 ---
 

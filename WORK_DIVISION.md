@@ -18,15 +18,15 @@
 ## 🔗 Dependency Graph & Execution Order
 
 ```
-                    WEEK 1-2              WEEK 3-4              WEEK 5-8              WEEK 9-14
+                    WEEK 1-2              WEEK 3-4              WEEK 5-8              WEEK 9-11
                     ────────              ────────              ────────              ─────────
 
      ┌─────────────────────────────────────────────────────────────────────────────────────────┐
-     │ DEV 1: INFRASTRUCTURE                                                                   │
-     │ ┌──────────────┐    ┌──────────────┐    ┌──────────────┐    ┌──────────────┐           │
-     │ │ DatabaseMgr  │───►│ SchemaInspect│───►│ FixtureLoader│───►│ Cloud Dialect│           │
-     │ │ (BLOCKING)   │    │              │    │              │    │ BigQuery/Snow│           │
-     │ └──────────────┘    └──────────────┘    └──────────────┘    └──────────────┘           │
+     │ DEV 1: POSTGRESQL DATA LAYER (Zero ORM)                                                 │
+     │ ┌──────────────┐    ┌──────────────┐    ┌──────────────┐                               │
+     │ │ DatabaseMgr  │───►│ SchemaInspect│───►│ FixtureLoader│   ✓ COMPLETE BY WEEK 6       │
+     │ │ (psycopg3)   │    │ (pg_catalog) │    │ (COPY)       │                               │
+     │ └──────────────┘    └──────────────┘    └──────────────┘                               │
      └─────────┬───────────────────┬───────────────────────────────────────────────────────────┘
                │                   │
                │ UNBLOCKS          │ UNBLOCKS
@@ -67,7 +67,7 @@
 
 ### Scope
 
-All database connectivity, ORM management, schema introspection, and fixture loading.
+PostgreSQL connectivity via psycopg3, connection pooling, schema introspection via pg_catalog, and fixture loading via COPY protocol.
 
 ### Files Owned
 
@@ -77,50 +77,50 @@ src/agentx/
 │   └── config.py                   # Framework configuration
 ├── infrastructure/
 │   ├── __init__.py
-│   ├── database_manager.py         # Multi-dialect engine factory
-│   ├── schema_inspector.py         # SQLAlchemy + INFORMATION_SCHEMA
-│   ├── fixture_loader.py           # Tiered bulk loading
-│   └── dialects/
-│       ├── __init__.py
-│       ├── base.py                 # Dialect interface
-│       ├── postgres.py
-│       ├── sqlite.py
-│       ├── duckdb.py
-│       ├── bigquery.py             # Phase 6
-│       └── snowflake.py            # Phase 6
-docker-compose.yml
-pyproject.toml                      # Project dependencies
+│   ├── database_manager.py         # psycopg3 connection pool
+│   ├── schema_inspector.py         # pg_catalog introspection
+│   └── fixture_loader.py           # COPY-based bulk loading
+docker-compose.yml                   # PostgreSQL container
+pyproject.toml                       # Project dependencies
 ```
 
 ### Deliverables by Week
 
 | Week  | Deliverable                         | Exit Criteria                                   |
 | ----- | ----------------------------------- | ----------------------------------------------- |
-| 1     | `DatabaseManager` + config          | Connect to Postgres/SQLite/DuckDB               |
+| 1     | `DatabaseManager` + config          | psycopg3 pool connects to PostgreSQL            |
 | 2     | Docker Compose + connection pooling | `docker-compose up` works, pooling tested       |
-| 3     | `SchemaInspector` basic             | Enumerate tables/columns for all 3 dialects     |
-| 4     | Nested type introspection           | STRUCT/ARRAY types handled via raw SQL fallback |
-| 5-6   | `FixtureLoader`                     | Load <100K via ORM, >100K via bulk              |
-| 7-8   | Transactional rollback              | Per-test isolation verified                     |
-| 12-14 | BigQuery/Snowflake dialects         | Cloud connections + introspection working       |
+| 3     | `SchemaInspector`                   | Enumerate tables/columns/FKs via pg_catalog     |
+| 4     | `FixtureLoader` with COPY           | Bulk load via PostgreSQL COPY protocol          |
+| 5-6   | Transactional rollback              | Per-test isolation via savepoints               |
 
 ### Interfaces to Expose
 
 ```python
-# Other devs depend on these interfaces
+# Zero-ORM interfaces using psycopg3
+from psycopg import Connection
+from psycopg_pool import ConnectionPool
+from contextlib import contextmanager
 
 class DatabaseManager:
-    def get_engine(self, dialect: str) -> Engine: ...
-    def get_connection(self, dialect: str) -> Connection: ...
+    def __init__(self, database_url: str, pool_size: int = 10): ...
+    def open(self) -> None: ...
+    def close(self) -> None: ...
+    @contextmanager
+    def connection(self) -> Connection: ...
+    def execute(self, sql: str, params: tuple = ()) -> list[dict]: ...
 
 class SchemaInspector:
-    def get_tables(self) -> List[str]: ...
-    def get_columns(self, table: str) -> List[ColumnInfo]: ...
+    def __init__(self, conn: Connection): ...
+    def get_tables(self) -> list[str]: ...
+    def get_columns(self, table: str) -> list[ColumnInfo]: ...
+    def get_foreign_keys(self, table: str) -> list[ForeignKey]: ...
     def get_schema_snapshot(self) -> SchemaSnapshot: ...
 
 class FixtureLoader:
-    def load(self, fixtures: Dict[str, Any]) -> None: ...
-    def teardown(self) -> None: ...
+    def __init__(self, db_manager: DatabaseManager): ...
+    def load(self, table: str, rows: list[dict]) -> int: ...  # Uses COPY
+    def teardown(self, tables: list[str]) -> None: ...
 ```
 
 ### Dependencies
@@ -265,7 +265,7 @@ class AgentInterface(Protocol):
 
 ### Dependencies
 
-- Dev 1: `DatabaseManager.get_connection()` (Week 1), `SchemaInspector` (Week 3)
+- Dev 1: `DatabaseManager.connection()` (Week 1), `SchemaInspector` (Week 3)
 - Dev 2: `HallucinationDetector` (Week 4)
 
 ### Blocks
@@ -356,7 +356,7 @@ class ErrorTaxonomy:
 
 ### Dependencies
 
-- Dev 1: `DatabaseManager.get_connection()` (Week 1)
+- Dev 1: `DatabaseManager.connection()` (Week 1)
 - Dev 2: `HallucinationReport` (Week 4)
 - Dev 3: `AgentSession`, `AgentInterface` (Week 8)
 
@@ -610,17 +610,17 @@ class SessionTrace:
 
 | Developer | Weeks | Key Deliverables                                                    | Depends On                                     | Blocks      |
 | --------- | ----- | ------------------------------------------------------------------- | ---------------------------------------------- | ----------- |
-| **Dev 1** | 1-14  | DatabaseManager, SchemaInspector, FixtureLoader, Cloud Dialects     | None                                           | Dev 2, 3, 4 |
+| **Dev 1** | 1-6   | DatabaseManager (psycopg3), SchemaInspector, FixtureLoader          | None                                           | Dev 2, 3, 4 |
 | **Dev 2** | 2-8   | SQLParser, SchemaValidator, HallucinationDetector, JoinPathVerifier | Dev 1 (Week 3)                                 | Dev 3, 4    |
 | **Dev 3** | 2-11  | Tool Protocol, 5 Tools, AgentSession                                | Dev 1 (Week 1), Dev 2 (Week 4)                 | Dev 4       |
-| **Dev 4** | 3-14  | Executor, Comparators, Scorer, Logger, Orchestrator, CLI            | Dev 1 (Week 1), Dev 2 (Week 4), Dev 3 (Week 8) | None        |
+| **Dev 4** | 3-11  | Executor, Comparators, Scorer, Logger, Orchestrator, CLI            | Dev 1 (Week 1), Dev 2 (Week 4), Dev 3 (Week 8) | None        |
 
 ---
 
 ## 🔑 Critical Path
 
 ```
-Dev 1: DatabaseManager (Week 1) → SchemaSnapshot (Week 3)
+Dev 1: DatabaseManager (Week 1) → SchemaSnapshot (Week 3) → FixtureLoader (Week 4)
                 ↓
 Dev 2: SchemaValidator (Week 3) → HallucinationDetector (Week 4)
                 ↓
