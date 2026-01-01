@@ -128,6 +128,9 @@ python test_enhanced_scoring.py
 
 # Test evaluation pipeline integration
 python test_evaluation_pipeline.py
+
+# Test A2A protocol interface
+python test_a2a.py
 ```
 
 ---
@@ -268,6 +271,105 @@ print(f"Score: {result.match_score}")
 
 ---
 
+## A2A Protocol Interface
+
+AgentX provides a standardized A2A (Agent-to-Agent) REST API for external agents to interact with the benchmark.
+
+### Start the A2A Server
+
+```bash
+# Start with default settings (SQLite, port 5000)
+python -m a2a.server
+
+# Custom configuration
+python -m a2a.server --dialect postgresql --port 8080 --host 0.0.0.0
+```
+
+### API Endpoints
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/info` | Get benchmark information |
+| `GET` | `/health` | Health check |
+| `GET` | `/schema` | Get database schema |
+| `POST` | `/agents/register` | Register an agent |
+| `POST` | `/tasks` | Get available evaluation tasks |
+| `POST` | `/evaluate` | Submit SQL for evaluation |
+| `POST` | `/evaluate/batch` | Batch evaluation |
+| `GET` | `/leaderboard` | View leaderboard |
+| `GET` | `/agents/{id}/results` | Get agent results |
+
+### Agent Integration Example
+
+```python
+from a2a import A2AClient
+
+# Connect to benchmark server
+client = A2AClient("http://localhost:5000")
+
+# Register your agent
+agent = client.register(
+    agent_name="MyLLMAgent",
+    agent_version="1.0.0",
+    capabilities=["sql_generation", "schema_understanding"],
+)
+
+# Get available tasks
+tasks = client.get_tasks(difficulty="easy", limit=5)
+
+# Submit SQL for evaluation
+for task in tasks:
+    sql = my_llm_generate_sql(task.question, task.schema_info)  # Your agent
+    result = client.evaluate(task.task_id, sql)
+
+    print(f"Task: {task.task_id}")
+    print(f"Score: {result.scores.overall:.2%}")
+    print(f"Correctness: {result.scores.correctness:.2%}")
+    print(f"Safety: {result.scores.safety:.2%}")
+
+# Check your ranking
+leaderboard = client.get_leaderboard()
+```
+
+### Evaluation Request Format
+
+```json
+{
+    "agent_id": "your-agent-id",
+    "task_id": "sqlite_simple_select",
+    "sql": "SELECT * FROM customers LIMIT 10",
+    "execution_trace": [
+        {"step": 1, "action": "analyze_schema"},
+        {"step": 2, "action": "generate_sql"}
+    ]
+}
+```
+
+### Evaluation Response Format
+
+```json
+{
+    "task_id": "sqlite_simple_select",
+    "status": "success",
+    "scores": {
+        "overall": 0.95,
+        "correctness": 1.0,
+        "efficiency": 0.9,
+        "safety": 1.0,
+        "completeness": 0.9,
+        "semantic_accuracy": 1.0,
+        "best_practices": 0.85,
+        "plan_quality": 0.95
+    },
+    "execution_success": true,
+    "rows_returned": 10,
+    "execution_time_ms": 2.5,
+    "suggestions": ["Specify only the columns you need"]
+}
+```
+
+---
+
 ## Project Structure
 
 ```
@@ -285,6 +387,12 @@ AgentX-Hackathon/
 │       ├── sql_parser.py          # Multi-dialect parser (sqlglot)
 │       └── hallucination.py       # Hallucination detection
 │
+├── a2a/                           # A2A Protocol Interface
+│   ├── __init__.py                # Public exports
+│   ├── server.py                  # REST API server (Flask)
+│   ├── client.py                  # Client library for agents
+│   └── models.py                  # Request/response models
+│
 ├── evaluation/                    # Scoring system
 │   ├── data_structures.py         # ExecutionResult, ComparisonResult
 │   ├── result_comparator.py       # Result comparison logic
@@ -297,7 +405,8 @@ AgentX-Hackathon/
 │
 ├── test_multi_dialect.py          # Multi-dialect tests
 ├── test_enhanced_scoring.py       # Scoring component tests
-└── test_evaluation_pipeline.py    # Integration tests
+├── test_evaluation_pipeline.py    # Integration tests
+└── test_a2a.py                    # A2A interface tests
 ```
 
 ---
