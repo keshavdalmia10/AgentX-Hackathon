@@ -42,6 +42,13 @@ from .validation import (
     ValidationResult,
 )
 from .executor import SQLExecutor, ExecutorConfig, ExecutorResult
+from .logging import (
+    get_logger,
+    configure_logging,
+    LogContext,
+    EventLogger,
+    event_logger,
+)
 
 __version__ = "0.1.0"
 
@@ -66,4 +73,10 @@ __all__ = [
     "SQLExecutor",
     "ExecutorConfig",
     "ExecutorResult",
+    # Logging
+    "get_logger",
+    "configure_logging",
+    "LogContext",
+    "EventLogger",
+    "event_logger",
 ]

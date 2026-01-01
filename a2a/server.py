@@ -15,12 +15,12 @@ import os
 import sys
 import json
 import uuid
-import logging
+import time
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 from functools import wraps
 
-from flask import Flask, request, jsonify, Response
+from flask import Flask, request, jsonify, Response, g
 from flask_cors import CORS
 
 # Add src to path
@@ -41,12 +41,27 @@ from .models import (
     SessionState,
 )
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger("a2a.server")
+# Import structured logging
+try:
+    from agentx.logging import (
+        get_logger,
+        configure_logging,
+        LogContext,
+        event_logger,
+    )
+    # Configure JSON logging
+    configure_logging(json_output=os.environ.get("LOG_FORMAT", "json") == "json")
+    logger = get_logger("a2a.server")
+except ImportError:
+    # Fallback to basic logging if agentx.logging not available
+    import logging
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    )
+    logger = logging.getLogger("a2a.server")
+    event_logger = None
+    LogContext = None
 
 
 class A2AServer:
@@ -443,6 +458,41 @@ def create_app(
 
     # Store server on app for access in routes
     app.a2a_server = server
+
+    # =========================================================================
+    # REQUEST LOGGING MIDDLEWARE
+    # =========================================================================
+
+    @app.before_request
+    def log_request_start():
+        """Log incoming request and set timing."""
+        g.request_id = str(uuid.uuid4())[:8]
+        g.start_time = time.time()
+
+        # Log request (skip health checks to reduce noise)
+        if request.path != "/health":
+            logger.info(
+                "Request started",
+                request_id=g.request_id,
+                method=request.method,
+                path=request.path,
+                remote_addr=request.remote_addr,
+            )
+
+    @app.after_request
+    def log_request_complete(response):
+        """Log request completion with timing."""
+        if hasattr(g, "start_time") and request.path != "/health":
+            duration_ms = (time.time() - g.start_time) * 1000
+            logger.info(
+                "Request completed",
+                request_id=getattr(g, "request_id", "unknown"),
+                method=request.method,
+                path=request.path,
+                status_code=response.status_code,
+                duration_ms=round(duration_ms, 2),
+            )
+        return response
 
     # =========================================================================
     # API ENDPOINTS
