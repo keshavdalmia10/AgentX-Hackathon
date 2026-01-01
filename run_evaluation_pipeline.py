@@ -1,18 +1,33 @@
 """
-Evaluation Pipeline - Runs SQL through SQLAgent and sends to Scorer
+Evaluation Pipeline - Runs SQL through SQLExecutor and sends to Scorer
+
+Multi-dialect support: SQLite, DuckDB, PostgreSQL, BigQuery
 
 Usage:
+    # SQLite (default, zero setup)
     python run_evaluation_pipeline.py "SELECT * FROM users"
-    python run_evaluation_pipeline.py --file query.sql
+
+    # DuckDB
+    python run_evaluation_pipeline.py "SELECT * FROM users" --dialect duckdb --db-path data.duckdb
+
+    # PostgreSQL
+    python run_evaluation_pipeline.py "SELECT * FROM users" --dialect postgresql --connection-string "postgresql://..."
+
+    # With expected results
     python run_evaluation_pipeline.py --file query.sql --expected expected_results.json
 """
 
 import argparse
 import json
 import sys
+import os
+
+# Add src to path
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
+
 from typing import Dict, Any, List, Optional
 
-from executor.sql_agent import SQLAgent
+from agentx import SQLExecutor, ExecutorConfig
 from evaluation.data_structures import (
     AgentResult,
     ExecutionResult,
@@ -34,20 +49,52 @@ def load_expected_results(filepath: str) -> List[Dict[str, Any]]:
         return json.load(f)
 
 
-def run_sql_agent(sql: str, database_url: str) -> Dict[str, Any]:
+def create_executor(
+    dialect: str,
+    db_path: Optional[str] = None,
+    connection_string: Optional[str] = None,
+) -> SQLExecutor:
     """
-    Run SQL through the SQLAgent.
-    
-    Returns the raw agent output dictionary.
+    Create a SQLExecutor for the specified dialect.
+
+    Args:
+        dialect: Database dialect (sqlite, duckdb, postgresql, bigquery)
+        db_path: Path to database file (for SQLite, DuckDB)
+        connection_string: Connection string (for PostgreSQL)
+
+    Returns:
+        Configured SQLExecutor
     """
-    agent = SQLAgent(database_url)
-    result = agent.process_query(sql, verbose=True)
-    return result
+    config = ExecutorConfig(
+        dialect=dialect,
+        db_path=db_path,
+        connection_string=connection_string,
+    )
+    return SQLExecutor(config)
+
+
+def run_sql_executor(
+    sql: str,
+    dialect: str = "sqlite",
+    db_path: Optional[str] = None,
+    connection_string: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Run SQL through the SQLExecutor.
+
+    Returns the raw executor output dictionary.
+    """
+    executor = create_executor(dialect, db_path, connection_string)
+    try:
+        result = executor.process_query(sql, verbose=True)
+        return result.to_dict()
+    finally:
+        executor.close()
 
 
 def convert_to_execution_result(agent_output: Dict[str, Any]) -> ExecutionResult:
     """
-    Convert SQLAgent output to ExecutionResult for scoring.
+    Convert SQLExecutor output to ExecutionResult for scoring.
     """
     agent_result = AgentResult.from_agent_output(agent_output)
     return agent_result.to_execution_result()
@@ -70,12 +117,12 @@ def score_execution(
 ) -> Dict[str, Any]:
     """
     Score the execution using the DefaultScorer.
-    
+
     Returns a dictionary with all score dimensions.
     """
     scorer = DefaultScorer()
     score = scorer.score(comparison, execution_result)
-    
+
     return {
         "overall": round(score.overall, 4),
         "dimensions": {
@@ -96,41 +143,44 @@ def score_execution(
 
 def run_evaluation_pipeline(
     sql: str,
-    database_url: str,
+    dialect: str = "sqlite",
+    db_path: Optional[str] = None,
+    connection_string: Optional[str] = None,
     expected_results: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """
     Complete evaluation pipeline:
-    1. Run SQL through SQLAgent
+    1. Run SQL through SQLExecutor (multi-dialect)
     2. Convert output to ExecutionResult
     3. Compare with expected results (if provided)
     4. Score the execution
     5. Return comprehensive results
     """
     print("\n" + "=" * 80)
-    print("🚀 EVALUATION PIPELINE")
+    print("EVALUATION PIPELINE")
     print("=" * 80)
-    
-    # Step 1: Run SQL through agent
-    print("\n📥 Step 1: Running SQL through SQLAgent...")
-    agent_output = run_sql_agent(sql, database_url)
-    
+    print(f"Dialect: {dialect.upper()}")
+
+    # Step 1: Run SQL through executor
+    print(f"\nStep 1: Running SQL through SQLExecutor ({dialect})...")
+    agent_output = run_sql_executor(sql, dialect, db_path, connection_string)
+
     # Step 2: Convert to ExecutionResult
-    print("\n🔄 Step 2: Converting to ExecutionResult...")
+    print("\nStep 2: Converting to ExecutionResult...")
     execution_result = convert_to_execution_result(agent_output)
-    print(f"   ✅ Execution success: {execution_result.success}")
-    print(f"   📊 Rows returned: {execution_result.rows_returned}")
-    print(f"   ⏱️  Execution time: {execution_result.execution_time_ms:.2f}ms")
-    
+    print(f"   Execution success: {execution_result.success}")
+    print(f"   Rows returned: {execution_result.rows_returned}")
+    print(f"   Execution time: {execution_result.execution_time_ms:.2f}ms")
+
     # Step 3: Compare results
-    print("\n⚖️  Step 3: Comparing results...")
+    print("\nStep 3: Comparing results...")
     actual_data = execution_result.data
-    
+
     if expected_results is not None:
         comparison = compare_results(actual_data, expected_results)
-        print(f"   📋 Expected rows: {len(expected_results)}")
-        print(f"   {'✅' if comparison.is_match else '❌'} Match: {comparison.is_match}")
-        print(f"   📈 Match score: {comparison.match_score:.2%}")
+        print(f"   Expected rows: {len(expected_results)}")
+        print(f"   Match: {comparison.is_match}")
+        print(f"   Match score: {comparison.match_score:.2%}")
     else:
         # No expected results - create a "self-comparison" (perfect match)
         comparison = ComparisonResult(
@@ -140,26 +190,27 @@ def run_evaluation_pipeline(
             column_count_match=True,
             details={"message": "No expected results provided - using self-comparison"},
         )
-        print("   ⚠️  No expected results provided - assuming correctness")
-    
+        print("   No expected results provided - assuming correctness")
+
     # Step 4: Score execution
-    print("\n🏆 Step 4: Scoring execution...")
+    print("\nStep 4: Scoring execution...")
     scores = score_execution(comparison, execution_result)
-    
+
     print(f"\n   {'=' * 40}")
-    print(f"   📊 SCORES")
+    print(f"   SCORES")
     print(f"   {'=' * 40}")
-    print(f"   🎯 Overall Score: {scores['overall']:.2%}")
-    print(f"   {'─' * 40}")
-    print(f"   📋 Correctness:    {scores['dimensions']['correctness']:.2%} (weight: 40%)")
-    print(f"   ⚡ Efficiency:     {scores['dimensions']['efficiency']:.2%} (weight: 20%)")
-    print(f"   🛡️  Safety:         {scores['dimensions']['safety']:.2%} (weight: 25%)")
-    print(f"   📦 Completeness:   {scores['dimensions']['result_completeness']:.2%} (weight: 15%)")
+    print(f"   Overall Score: {scores['overall']:.2%}")
+    print(f"   {'-' * 40}")
+    print(f"   Correctness:    {scores['dimensions']['correctness']:.2%} (weight: 40%)")
+    print(f"   Efficiency:     {scores['dimensions']['efficiency']:.2%} (weight: 20%)")
+    print(f"   Safety:         {scores['dimensions']['safety']:.2%} (weight: 25%)")
+    print(f"   Completeness:   {scores['dimensions']['result_completeness']:.2%} (weight: 15%)")
     print(f"   {'=' * 40}")
-    
+
     # Compile final output
     pipeline_result = {
         "query": sql,
+        "dialect": dialect,
         "agent_status": agent_output.get("overall_status", "UNKNOWN"),
         "execution_result": {
             "success": execution_result.success,
@@ -175,13 +226,13 @@ def run_evaluation_pipeline(
         },
         "scores": scores,
     }
-    
+
     return pipeline_result
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Run SQL through SQLAgent and score with Evaluation pipeline"
+        description="Run SQL through multi-dialect SQLExecutor and score with Evaluation pipeline"
     )
     parser.add_argument(
         "sql",
@@ -197,47 +248,63 @@ def main():
         help="Path to a JSON file containing expected results",
     )
     parser.add_argument(
-        "--database-url", "-d",
-        default="postgresql://testuser:testpass@localhost:5432/testdb",
-        help="PostgreSQL connection string",
+        "--dialect", "-D",
+        default="sqlite",
+        choices=["sqlite", "duckdb", "postgresql", "bigquery"],
+        help="SQL dialect to use (default: sqlite)",
+    )
+    parser.add_argument(
+        "--db-path",
+        help="Path to database file (for SQLite, DuckDB). Use ':memory:' for in-memory.",
+    )
+    parser.add_argument(
+        "--connection-string", "-c",
+        help="Database connection string (for PostgreSQL)",
     )
     parser.add_argument(
         "--output", "-o",
         help="Path to save the results as JSON",
     )
-    
+
     args = parser.parse_args()
-    
+
     # Get SQL query
     if args.file:
         sql = load_sql_from_file(args.file)
     elif args.sql:
         sql = args.sql
     else:
-        print("❌ Error: Please provide a SQL query or use --file")
+        print("Error: Please provide a SQL query or use --file")
         sys.exit(1)
-    
+
     # Load expected results if provided
     expected_results = None
     if args.expected:
         expected_results = load_expected_results(args.expected)
-    
+
     # Run the pipeline
-    result = run_evaluation_pipeline(sql, args.database_url, expected_results)
-    
+    result = run_evaluation_pipeline(
+        sql=sql,
+        dialect=args.dialect,
+        db_path=args.db_path,
+        connection_string=args.connection_string,
+        expected_results=expected_results,
+    )
+
     # Save output if requested
     if args.output:
         with open(args.output, 'w') as f:
             json.dump(result, f, indent=2, default=str)
-        print(f"\n💾 Results saved to: {args.output}")
-    
+        print(f"\nResults saved to: {args.output}")
+
     # Print final summary
     print("\n" + "=" * 80)
-    print("✅ PIPELINE COMPLETE")
+    print("PIPELINE COMPLETE")
     print("=" * 80)
+    print(f"Dialect: {result['dialect'].upper()}")
     print(f"Final Score: {result['scores']['overall']:.2%}")
     print("=" * 80 + "\n")
-    
+
     return result
 
 
