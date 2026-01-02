@@ -146,7 +146,9 @@ class HallucinationDetector:
             parsed.identifiers.columns,
             parsed.identifiers.tables,
             parsed.identifiers.aliases,
-            schema
+            schema,
+            select_aliases=parsed.identifiers.select_aliases,
+            cte_columns=parsed.identifiers.cte_columns
         )
 
         # Detect phantom functions (dialect-aware)
@@ -264,7 +266,9 @@ class HallucinationDetector:
         columns: List[str],
         tables: List[str],
         aliases: Dict[str, str],
-        schema: SchemaSnapshot
+        schema: SchemaSnapshot,
+        select_aliases: Set[str] = None,
+        cte_columns: Dict[str, Set[str]] = None
     ) -> List[str]:
         """
         Find columns that don't exist in any referenced table.
@@ -273,12 +277,26 @@ class HallucinationDetector:
         - Unqualified column names (checks all tables)
         - Qualified names (table.column)
         - Alias-qualified names (alias.column)
+        - SELECT aliases (e.g., COUNT(*) as total -> total is valid)
+        - CTE columns (columns defined in WITH clauses)
         """
         phantom = []
+        select_aliases = select_aliases or set()
+        cte_columns = cte_columns or {}
 
         # Build set of valid columns from all referenced tables
         valid_columns: Set[str] = set()
         valid_qualified: Set[str] = set()
+
+        # Add SELECT aliases as valid columns
+        valid_columns.update(select_aliases)
+
+        # Add CTE columns as valid
+        for cte_name, cte_cols in cte_columns.items():
+            valid_columns.update(cte_cols)
+            # Also add qualified versions (cte_name.column)
+            for col in cte_cols:
+                valid_qualified.add(f"{cte_name}.{col}")
 
         # Add columns from explicitly referenced tables
         for table in tables:
@@ -298,20 +316,30 @@ class HallucinationDetector:
 
         # Also add columns from aliased tables
         for alias, actual in aliases.items():
+            alias_lower = alias.lower()
+
             if actual in {"(cte)", "(subquery)"}:
-                continue  # Can't validate CTE columns
+                # For CTEs and subqueries, use the cte_columns if available
+                if alias_lower in cte_columns:
+                    for col in cte_columns[alias_lower]:
+                        valid_qualified.add(f"{alias_lower}.{col}")
+                continue
 
             actual_table = schema.get_table(actual)
             if actual_table:
                 for col in actual_table.columns:
                     col_lower = col.name.lower()
                     valid_columns.add(col_lower)
-                    valid_qualified.add(f"{alias.lower()}.{col_lower}")
+                    valid_qualified.add(f"{alias_lower}.{col_lower}")
 
         # Check each column
         for col in columns:
             col_lower = col.lower()
             col_name_only = col.split(".")[-1].lower()
+
+            # Skip if it's a SELECT alias
+            if col_lower in select_aliases:
+                continue
 
             # Skip if it's a valid qualified column
             if col_lower in valid_qualified:
@@ -327,12 +355,27 @@ class HallucinationDetector:
                 table_part = parts[0].lower()
                 col_part = parts[-1].lower()
 
+                # Check if it's a CTE/subquery column reference
+                if table_part in cte_columns:
+                    if col_part in cte_columns[table_part]:
+                        continue
+
                 # Check if it's an alias
                 if table_part in {a.lower() for a in aliases}:
-                    # Can't fully validate CTE/subquery columns
-                    actual = aliases.get(table_part, "")
+                    actual = None
+                    for a, t in aliases.items():
+                        if a.lower() == table_part:
+                            actual = t
+                            break
+
+                    # For CTEs/subqueries, check if column is in cte_columns
                     if actual in {"(cte)", "(subquery)"}:
-                        continue
+                        if table_part in cte_columns and col_part in cte_columns[table_part]:
+                            continue
+                        # If we don't know the CTE columns, assume it's valid
+                        # (better to have false negatives than false positives)
+                        if table_part not in cte_columns:
+                            continue
 
                 # Check if the column exists in any table
                 found_in_any = False
@@ -340,6 +383,10 @@ class HallucinationDetector:
                     if any(c.name.lower() == col_part for c in table_info.columns):
                         found_in_any = True
                         break
+
+                # Also check if it's a SELECT alias or CTE column
+                if col_part in select_aliases or col_part in valid_columns:
+                    found_in_any = True
 
                 if not found_in_any:
                     phantom.append(col)

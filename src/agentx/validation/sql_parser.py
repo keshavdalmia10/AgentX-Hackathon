@@ -25,6 +25,8 @@ class IdentifierSet:
     columns: List[str] = field(default_factory=list)
     functions: List[str] = field(default_factory=list)
     aliases: Dict[str, str] = field(default_factory=dict)  # alias -> actual name
+    select_aliases: Set[str] = field(default_factory=set)  # aliases defined in SELECT
+    cte_columns: Dict[str, Set[str]] = field(default_factory=dict)  # CTE name -> its columns
 
     def __post_init__(self):
         # Deduplicate while preserving order
@@ -183,14 +185,36 @@ class MultiDialectSQLParser:
         - Column names (including qualified names like table.column)
         - Function names
         - Table aliases
+        - SELECT aliases (column aliases defined in SELECT)
+        - CTE columns (columns defined in CTEs)
         """
         tables = []
         columns = []
         functions = []
         aliases = {}
+        select_aliases: Set[str] = set()
+        cte_columns: Dict[str, Set[str]] = {}
 
         if ast is None:
             return IdentifierSet()
+
+        # Extract CTEs first - we need their column definitions
+        for cte in ast.find_all(exp.CTE):
+            cte_name = None
+            if hasattr(cte, 'alias') and cte.alias:
+                cte_name = cte.alias
+                aliases[cte.alias] = "(cte)"
+
+            # Extract columns defined in this CTE
+            if cte_name:
+                cte_cols = self._extract_cte_columns(cte)
+                if cte_cols:
+                    cte_columns[cte_name.lower()] = cte_cols
+
+        # Extract SELECT aliases from all SELECT statements (including subqueries)
+        for select in ast.find_all(exp.Select):
+            sel_aliases = self._extract_select_aliases(select)
+            select_aliases.update(sel_aliases)
 
         # Extract tables
         for table in ast.find_all(exp.Table):
@@ -220,21 +244,102 @@ class MultiDialectSQLParser:
             if func_name:
                 functions.append(func_name)
 
-        # Extract aliases from subqueries and CTEs
+        # Extract aliases from subqueries
         for subquery in ast.find_all(exp.Subquery):
             if subquery.alias:
-                aliases[subquery.alias] = f"(subquery)"
-
-        for cte in ast.find_all(exp.CTE):
-            if hasattr(cte, 'alias') and cte.alias:
-                aliases[cte.alias] = "(cte)"
+                aliases[subquery.alias] = "(subquery)"
+                # Also extract columns from subquery
+                subq_cols = self._extract_subquery_columns(subquery)
+                if subq_cols:
+                    cte_columns[subquery.alias.lower()] = subq_cols
 
         return IdentifierSet(
             tables=tables,
             columns=columns,
             functions=functions,
             aliases=aliases,
+            select_aliases=select_aliases,
+            cte_columns=cte_columns,
         )
+
+    def _extract_select_aliases(self, select: exp.Select) -> Set[str]:
+        """Extract column aliases defined in a SELECT clause."""
+        aliases = set()
+
+        if not select.expressions:
+            return aliases
+
+        for expr in select.expressions:
+            # Check if this expression has an alias
+            if isinstance(expr, exp.Alias):
+                alias_name = expr.alias
+                if alias_name:
+                    aliases.add(alias_name.lower())
+            elif hasattr(expr, 'alias') and expr.alias:
+                aliases.add(expr.alias.lower())
+
+        return aliases
+
+    def _extract_cte_columns(self, cte: exp.CTE) -> Set[str]:
+        """Extract column names defined in a CTE."""
+        columns = set()
+
+        # Get the CTE's SELECT statement
+        cte_query = cte.this
+        if cte_query is None:
+            return columns
+
+        # Handle the case where cte.this is a Select or has a Select within it
+        select = None
+        if isinstance(cte_query, exp.Select):
+            select = cte_query
+        else:
+            # Try to find a Select within the CTE
+            selects = list(cte_query.find_all(exp.Select))
+            if selects:
+                select = selects[0]
+
+        if select and select.expressions:
+            for expr in select.expressions:
+                col_name = self._get_expression_output_name(expr)
+                if col_name:
+                    columns.add(col_name.lower())
+
+        return columns
+
+    def _extract_subquery_columns(self, subquery: exp.Subquery) -> Set[str]:
+        """Extract column names from a subquery's SELECT."""
+        columns = set()
+
+        # Get the subquery's SELECT
+        inner = subquery.this
+        if isinstance(inner, exp.Select) and inner.expressions:
+            for expr in inner.expressions:
+                col_name = self._get_expression_output_name(expr)
+                if col_name:
+                    columns.add(col_name.lower())
+
+        return columns
+
+    def _get_expression_output_name(self, expr: Any) -> Optional[str]:
+        """Get the output column name for an expression."""
+        # If it's an alias, return the alias name
+        if isinstance(expr, exp.Alias):
+            return expr.alias
+
+        # If it has an alias attribute
+        if hasattr(expr, 'alias') and expr.alias:
+            return expr.alias
+
+        # If it's a column reference, return the column name
+        if isinstance(expr, exp.Column):
+            return expr.name
+
+        # For other expressions, try to get output_name
+        if hasattr(expr, 'output_name'):
+            return expr.output_name
+
+        return None
 
     def _get_function_name(self, func: exp.Func) -> str:
         """Get the name of a function from AST node."""
