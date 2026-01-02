@@ -504,6 +504,149 @@ report = runner.run(sql_generator=my_llm_generate_sql)
 
 ---
 
+## Enterprise Benchmark
+
+AgentX includes a comprehensive enterprise benchmark with realistic data warehouse schemas and complex SQL patterns.
+
+### Enterprise Schema
+
+The enterprise schema includes 19 tables modeling a realistic data warehouse:
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                         ENTERPRISE DATA WAREHOUSE                            │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│  FACT TABLES                         DIMENSION TABLES                        │
+│  ┌─────────────────┐                 ┌─────────────────┐                    │
+│  │ sales_fact      │────────────────▶│ dim_customer    │                    │
+│  │ • 500 records   │                 │ • 50 customers  │                    │
+│  │ • tenant_id     │                 │ • segments      │                    │
+│  │ • measures      │                 └─────────────────┘                    │
+│  └─────────────────┘                 ┌─────────────────┐                    │
+│  ┌─────────────────┐                 │ dim_product     │                    │
+│  │ orders_fact     │────────────────▶│ • 30 products   │                    │
+│  │ • 300 orders    │                 │ • categories    │                    │
+│  └─────────────────┘                 └─────────────────┘                    │
+│  ┌─────────────────┐                 ┌─────────────────┐                    │
+│  │ user_events     │                 │ dim_date        │                    │
+│  │ • 1000 events   │                 │ • 365 days      │                    │
+│  │ • funnel data   │                 │ • holidays      │                    │
+│  └─────────────────┘                 └─────────────────┘                    │
+│                                      ┌─────────────────┐                    │
+│  SPECIAL TABLES                      │ dim_store       │                    │
+│  ┌─────────────────┐                 │ • 5 stores      │                    │
+│  │ dim_customer_scd│ (Type 2)        └─────────────────┘                    │
+│  │ employees       │ (Hierarchy)     ┌─────────────────┐                    │
+│  │ bill_of_materials│ (BOM)          │ dim_promotion   │                    │
+│  │ tenants         │ (Multi-tenant)  │ • discounts     │                    │
+│  └─────────────────┘                 └─────────────────┘                    │
+│                                                                              │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Run Enterprise Benchmark
+
+```bash
+# Run full enterprise benchmark
+python run_benchmark.py --schema enterprise --output results/
+
+# Run specific query patterns
+python run_benchmark.py --schema enterprise --tags star_schema --output results/
+python run_benchmark.py --schema enterprise --tags scd --output results/
+python run_benchmark.py --schema enterprise --tags window --output results/
+python run_benchmark.py --schema enterprise --tags recursive --output results/
+
+# Export as HTML report
+python run_benchmark.py --schema enterprise --format json,html --output results/
+```
+
+### Enterprise Query Patterns (30 Queries)
+
+| Category | Queries | Tags |
+|----------|---------|------|
+| **Star Schema** | Fact-dimension joins, time-based analysis | `star_schema`, `fact_table`, `dimension` |
+| **SCD Type 2** | Current records, history tracking, point-in-time | `scd`, `scd_type2`, `temporal` |
+| **Window Functions** | Running totals, moving averages, LAG/LEAD, NTILE, PERCENT_RANK | `window`, `running_total`, `moving_average` |
+| **Funnel Analysis** | Conversion funnels, drop-off rates | `funnel`, `conversion`, `marketing` |
+| **Sessionization** | User session detection with inactivity timeout | `sessionization`, `user_behavior` |
+| **Gap & Island** | Sequence gaps, consecutive streaks | `gaps_islands`, `streak`, `sequence` |
+| **Recursive CTE** | Org hierarchy, BOM explosion | `recursive`, `hierarchy`, `bom` |
+| **Analytics** | Cohort retention, RFM, churn prediction | `cohort`, `retention`, `churn` |
+| **Inventory** | ABC classification, demand forecasting | `abc_analysis`, `inventory`, `forecasting` |
+| **Data Quality** | Null checks, orphans, duplicates, anomalies | `data_quality`, `validation`, `anomaly` |
+| **Multi-tenant** | Tenant isolation, cross-tenant analytics | `multi_tenant`, `saas` |
+| **Attribution** | Multi-touch marketing attribution | `attribution`, `marketing` |
+
+### Example Enterprise Queries
+
+**Star Schema Join:**
+```sql
+SELECT dp.category, ds.region, SUM(sf.quantity * sf.unit_price) as total_sales
+FROM sales_fact sf
+JOIN dim_product dp ON sf.product_id = dp.product_id
+JOIN dim_store ds ON sf.store_id = ds.store_id
+GROUP BY dp.category, ds.region
+ORDER BY total_sales DESC
+```
+
+**SCD Type 2 Point-in-Time:**
+```sql
+SELECT customer_id, customer_name, segment
+FROM dim_customer_scd
+WHERE valid_from <= '2024-06-15'
+  AND (valid_to > '2024-06-15' OR valid_to IS NULL)
+```
+
+**Sessionization with 30-min Timeout:**
+```sql
+WITH time_diffs AS (
+  SELECT user_id, event_timestamp,
+    CASE WHEN (julianday(event_timestamp) -
+               julianday(LAG(event_timestamp) OVER (PARTITION BY user_id ORDER BY event_timestamp))) * 24 * 60 > 30
+         THEN 1 ELSE 0 END as new_session
+  FROM user_events
+)
+SELECT user_id, SUM(new_session) OVER (PARTITION BY user_id ORDER BY event_timestamp) as session_id
+FROM time_diffs
+```
+
+**Cohort Retention Analysis:**
+```sql
+WITH first_purchase AS (
+  SELECT customer_id, strftime('%Y-%m', MIN(order_date)) as cohort_month
+  FROM orders_fact GROUP BY customer_id
+)
+SELECT cohort_month, months_since_first,
+  COUNT(DISTINCT customer_id) as active_customers,
+  ROUND(COUNT(DISTINCT customer_id) * 100.0 / cohort_size, 2) as retention_rate
+FROM ...
+```
+
+### Programmatic Enterprise Setup
+
+```python
+from tasks.enterprise_schema import setup_enterprise_schema
+from agentx import SQLExecutor, ExecutorConfig
+
+# Create executor
+executor = SQLExecutor(ExecutorConfig(dialect="sqlite"))
+
+# Setup enterprise schema with sample data
+setup_enterprise_schema(executor)
+
+# Now you have 19 tables with realistic data
+result = executor.process_query("""
+    SELECT dp.category, SUM(sf.quantity * sf.unit_price) as revenue
+    FROM sales_fact sf
+    JOIN dim_product dp ON sf.product_id = dp.product_id
+    GROUP BY dp.category
+""")
+print(result.data)
+```
+
+---
+
 ## Project Structure
 
 ```
@@ -544,8 +687,11 @@ AgentX-Hackathon/
 ├── requirements.txt               # Dependencies
 │
 ├── tasks/                         # Benchmark tasks
+│   ├── enterprise_schema.py       # Enterprise schema setup (19 tables)
 │   └── gold_queries/              # Gold standard SQL queries
-│       └── sqlite/basic_queries.json  # 27 tasks with expected results
+│       └── sqlite/
+│           ├── basic_queries.json      # 27 basic tasks
+│           └── enterprise_queries.json # 30 enterprise tasks
 │
 ├── results/                       # Benchmark output directory
 │
